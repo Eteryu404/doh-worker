@@ -36,12 +36,22 @@ export default {
     // Pobierz/odśwież listę domen w tle
     ctx.waitUntil(loadBlocklist());
 
-    if (url.pathname === "/dns-query" || url.pathname === "/") {
+    // 1. Obsługa wejścia bezpośrednio na główny adres Workera
+    if (url.pathname === "/") {
+      return new Response("DoH Minimal Worker is Running!", { status: 200 });
+    }
+
+    if (url.pathname === "/dns-query") {
       let domainName = "";
 
-      // Obsługa zapytań DoH metodą GET (?name=example.com lub ?dns=...)
+      // Obsługa zapytań DoH metodą GET (?name=example.com)
       if (request.method === "GET") {
         domainName = url.searchParams.get("name") || "";
+      }
+
+      // Jeśli ktoś wszedł na /dns-query bez parametrów z przeglądarki, nie wywołuj błędu 405
+      if (request.method === "GET" && !url.search) {
+        return new Response("DoH Endpoint is Active. Please configure this URL in your DNS client.", { status: 200 });
       }
 
       // Jeśli wywoływana domena znajduje się na czarnej liście -> zwracamy NXDOMAIN
@@ -60,6 +70,6 @@ export default {
       });
     }
 
-    return new Response("DoH Minimal Worker is Running!", { status: 200 });
+    return new Response("Not Found", { status: 404 });
   }
 };
