@@ -36,54 +36,25 @@ export default {
     // Pobierz/odśwież listę domen w tle
     ctx.waitUntil(loadBlocklist());
 
-    // 1. Ładna, wyśrodkowana, zielona strona główna
+    // 1. Obsługa wejścia bezpośrednio na główny adres Workera
     if (url.pathname === "/") {
-      const html = `<!DOCTYPE html>
-      <html lang="pl">
-      <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>DoH Worker Status</title>
-          <style>
-              body {
-                  background-color: #0f172a;
-                  color: #22c55e;
-                  display: flex;
-                  justify-content: center;
-                  align-items: center;
-                  height: 100vh;
-                  margin: 0;
-                  font-family: system-ui, -apple-system, sans-serif;
-              }
-              h1 {
-                  font-size: 1.8rem;
-                  text-align: center;
-                  padding: 20px;
-              }
-          </style>
-      </head>
-      <body>
-          <h1>DoH Minimal Worker is Running!</h1>
-      </body>
-      </html>`;
-
-      return new Response(html, {
-        status: 200,
-        headers: { "Content-Type": "text/html; charset=utf-8" }
-      });
+      return new Response("DoH Minimal Worker is Running!", { status: 200 });
     }
 
     if (url.pathname === "/dns-query") {
       let domainName = "";
 
+      // Obsługa zapytań DoH metodą GET (?name=example.com)
       if (request.method === "GET") {
         domainName = url.searchParams.get("name") || "";
       }
 
+      // Jeśli ktoś wszedł na /dns-query bez parametrów z przeglądarki, nie wywołuj błędu 405
       if (request.method === "GET" && !url.search) {
         return new Response("DoH Endpoint is Active. Please configure this URL in your DNS client.", { status: 200 });
       }
 
+      // Jeśli wywoływana domena znajduje się na czarnej liście -> zwracamy NXDOMAIN
       if (domainName && blocklistSet.has(domainName.toLowerCase())) {
         return new Response(
           JSON.stringify({ Status: 3, Comment: "Blocked by Custom DoH Worker" }),
@@ -91,6 +62,7 @@ export default {
         );
       }
 
+      // Przekazanie zapytania do bezpiecznego DNS Cloudflare (Upstream)
       return await fetch(UPSTREAM_DOH + url.search, {
         method: request.method,
         headers: request.headers,
