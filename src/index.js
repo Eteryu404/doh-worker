@@ -3,10 +3,11 @@ const UPSTREAM_DOH = "https://cloudflare-dns.com/dns-query";
 
 let blocklistSet = new Set();
 let lastFetchTime = 0;
-const CACHE_TTL = 3600 * 1000;
+const CACHE_TTL = 3600 * 1000; // 1 godzina
 
 async function loadBlocklist() {
   const now = Date.now();
+  // Jeśli lista już istnieje i nie minęła godzina, nie pobieraj ponowie
   if (blocklistSet.size > 0 && (now - lastFetchTime) < CACHE_TTL) {
     return;
   }
@@ -19,25 +20,31 @@ async function loadBlocklist() {
       for (let i = 0; i < lines.length; i++) {
         let line = lines[i].trim();
         if (!line || line.startsWith('#')) continue;
-        // Oczyszczanie ewentualnych prefiksów hosts (0.0.0.0 / 127.0.0.1)
+        // Oczyszczanie prefiksów hosts oraz komentarzy w linii
         line = line.replace(/^(0\.0\.0\.0|127\.0\.0\.1)\s+/, '').split('#')[0].trim();
         if (line) {
-          newSet.add(line.toLowerCase());
+          // Normalizacja do małych liter i usunięcie ewentualnej kropki na końcu
+          newSet.add(line.toLowerCase().replace(/\.$/, ''));
         }
       }
-      blocklistSet = newSet;
-      lastFetchTime = now;
-      console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
+      // Podmień listę tylko wtedy, gdy pobrano poprawne dane
+      if (newSet.size > 0) {
+        blocklistSet = newSet;
+        lastFetchTime = now;
+        console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
+      }
     }
   } catch (err) {
     console.error("Błąd podczas pobierania bloklisty:", err);
   }
 }
 
-// Funkcja sprawdzająca domenę oraz jej domeny nadrzędne (subdomeny)
+// Sprawdzanie domeny i jej subdomen (hierarchiczne)
 function isBlocked(domain, blocklist) {
-  if (blocklist.has(domain)) return true;
-  const parts = domain.split('.');
+  const cleanDomain = domain.toLowerCase().replace(/\.$/, '');
+  if (blocklist.has(cleanDomain)) return true;
+  
+  const parts = cleanDomain.split('.');
   for (let i = 1; i < parts.length; i++) {
     const parent = parts.slice(i).join('.');
     if (blocklist.has(parent)) return true;
@@ -68,6 +75,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Awaryjne pobranie, jeśli Worker wystartował na czysto
     if (blocklistSet.size === 0) {
       await loadBlocklist();
     } else {
@@ -104,8 +112,8 @@ export default {
         domainName = extractDomainFromDNS(queryBuffer);
       }
 
-      // Sprawdzenie domeny wraz z dziedziczeniem subdomen
-      if (domainName && isBlocked(domainName.toLowerCase(), blocklistSet)) {
+      // Blokowanie zgodne z listą i subdomenami
+      if (domainName && isBlocked(domainName, blocklistSet)) {
         return new Response(
           JSON.stringify({ Status: 3, Comment: "Blocked by Custom DoH Worker" }),
           { status: 200, headers: { "Content-Type": "application/dns-json" } }
