@@ -1,5 +1,21 @@
 const BLOCKLIST_URL = "https://raw.githubusercontent.com/Eteryu404/dns-blocklists/refs/heads/main/output/doh_combined.txt";
-const UPSTREAM_DOH = "https://cloudflare-dns.com/dns-query";
+const DEFAULT_UPSTREAM = "https://cloudflare-dns.com/dns-query";
+
+// Awaryjna lista blokad na wypadek braku łączności z GitHubem
+const FALLBACK_BLOCKLIST = new Set([
+  "doubleclick.net",
+  "googlesyndication.com",
+  "googleadservices.com",
+  "google-analytics.com",
+  "googletagmanager.com",
+  "facebook.com",
+  "facebook.net",
+  "fbcdn.net",
+  "adservice.google.com",
+  "ads.google.com",
+  "telemetry.microsoft.com",
+  "v10.events.data.microsoft.com"
+]);
 
 let blocklistSet = new Set();
 let lastFetchTime = 0;
@@ -29,9 +45,15 @@ async function loadBlocklist() {
         lastFetchTime = now;
         console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
       }
+    } else {
+      throw new Error(`HTTP ${res.status}`);
     }
   } catch (err) {
     console.error("Błąd podczas pobierania bloklisty:", err);
+    if (blocklistSet.size === 0) {
+      blocklistSet = FALLBACK_BLOCKLIST;
+      console.log("Użyto awaryjnej listy blokad.");
+    }
   }
 }
 
@@ -48,35 +70,56 @@ function isBlocked(domain, blocklist) {
   return false;
 }
 
+// Parser domen z obsługą kompresji DNS (RFC 1035)
 function extractDomainFromDNS(buffer) {
   try {
     let offset = 12;
     let parts = [];
-    while (offset < buffer.byteLength) {
-      let len = buffer[offset];
+    let jumped = false;
+    let safety = 0;
+
+    while (offset < buffer.byteLength && safety < 128) {
+      safety++;
+      const len = buffer[offset];
+
       if (len === 0) break;
+
+      // Obsługa kompresji (bity 11xxxxxx = 0xC0)
+      if ((len & 0xC0) === 0xC0) {
+        if (offset + 1 >= buffer.byteLength) break;
+        const pointer = ((len & 0x3F) << 8) | buffer[offset + 1];
+        offset = pointer;
+        jumped = true;
+        continue;
+      }
+
       offset++;
       if (offset + len > buffer.byteLength) break;
-      let label = new TextDecoder().decode(buffer.subarray(offset, offset + len));
+      const label = new TextDecoder().decode(buffer.subarray(offset, offset + len));
       parts.push(label);
       offset += len;
+
+      if (jumped) break; // Po skoku zakończenie przetwarzania etykiety
     }
+
     return parts.join('.');
   } catch (e) {
     return "";
   }
 }
 
-// Generowanie binarnej odpowiedzi NXDOMAIN na podstawie istniejącego zapytania binarnego
+// Generowanie odpowiedzi NXDOMAIN z walidacją bufora
 function buildNxdomainWireFormat(requestBuffer) {
   if (!requestBuffer || requestBuffer.byteLength < 12) {
     return new Uint8Array([
-      0x00, 0x00, // Transaction ID
-      0x81, 0x83, // Flags: QR=1, RCODE=3 (NXDOMAIN)
-      0x00, 0x01, // QDCOUNT
-      0x00, 0x00, // ANCOUNT
-      0x00, 0x00, // NSCOUNT
-      0x00, 0x00  // ARCOUNT
+      0x00, 0x00, 0x81, 0x83, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]);
+  }
+
+  const qdcount = (requestBuffer[4] << 8) | requestBuffer[5];
+  if (qdcount === 0 || requestBuffer.byteLength < 17) {
+    return new Uint8Array([
+      requestBuffer[0], requestBuffer[1], 0x81, 0x83, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     ]);
   }
 
@@ -90,10 +133,13 @@ function buildNxdomainWireFormat(requestBuffer) {
   return responseBuffer;
 }
 
-// Generowanie binarnego pakietu NXDOMAIN od zera dla zapytań typu ?name=...
+// Generowanie binarnej odpowiedzi NXDOMAIN dla zapytań ?name=... z walidacją dł. etykiety
 function buildNxdomainResponseForDomain(domainName, qtype = 1) {
   const cleanDomain = domainName.toLowerCase().replace(/\.$/, '');
-  const labels = cleanDomain ? cleanDomain.split('.') : [];
+  const rawLabels = cleanDomain ? cleanDomain.split('.') : [];
+  
+  // Walidacja etykiet (maks. 63 znaki na etykietę)
+  const labels = rawLabels.filter(l => l.length > 0 && l.length <= 63);
   
   let qnameLen = 1;
   for (const label of labels) {
@@ -103,15 +149,14 @@ function buildNxdomainResponseForDomain(domainName, qtype = 1) {
   const bufferLen = 12 + qnameLen + 4;
   const responseBuffer = new Uint8Array(bufferLen);
   
-  // Header
-  responseBuffer[0] = Math.floor(Math.random() * 256);
-  responseBuffer[1] = Math.floor(Math.random() * 256);
+  // Determinostyczny Transaction ID (0x0000)
+  responseBuffer[0] = 0x00;
+  responseBuffer[1] = 0x00;
   responseBuffer[2] = 0x81;
   responseBuffer[3] = 0x83; // NXDOMAIN
   responseBuffer[4] = 0x00;
   responseBuffer[5] = 0x01; // QDCOUNT = 1
   
-  // Question section
   let offset = 12;
   for (const label of labels) {
     responseBuffer[offset] = label.length;
@@ -124,12 +169,10 @@ function buildNxdomainResponseForDomain(domainName, qtype = 1) {
   responseBuffer[offset] = 0x00;
   offset++;
   
-  // QTYPE
+  // QTYPE & QCLASS
   responseBuffer[offset] = (qtype >> 8) & 0xFF;
   responseBuffer[offset + 1] = qtype & 0xFF;
   offset += 2;
-  
-  // QCLASS (IN = 1)
   responseBuffer[offset] = 0x00;
   responseBuffer[offset + 1] = 0x01;
   
@@ -139,6 +182,7 @@ function buildNxdomainResponseForDomain(domainName, qtype = 1) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const upstreamUrl = (env && env.UPSTREAM_DOH) ? env.UPSTREAM_DOH : DEFAULT_UPSTREAM;
 
     if (blocklistSet.size === 0) {
       await loadBlocklist();
@@ -176,7 +220,7 @@ export default {
         domainName = extractDomainFromDNS(queryBuffer);
       }
 
-      // Blokowanie domeny – zawsze zwracamy binarny DNS wire format (NXDOMAIN)
+      // Zwrot odpowiedzi NXDOMAIN przy zablokowaniu
       if (domainName && isBlocked(domainName, blocklistSet)) {
         let responseBuffer;
         if (queryBuffer) {
@@ -195,10 +239,19 @@ export default {
         });
       }
 
-      return await fetch(UPSTREAM_DOH + url.search, {
+      // Oczyszczanie nagłówków przy przekazywaniu do upstreamu
+      const forwardHeaders = new Headers(request.headers);
+      forwardHeaders.delete("host");
+      forwardHeaders.delete("cf-connecting-ip");
+      forwardHeaders.delete("cf-ray");
+      forwardHeaders.delete("cf-ipcountry");
+
+      // Poprawka dla metody GET: wysyłanie body TYLKO przy POST
+      const isPost = request.method === "POST";
+      return await fetch(upstreamUrl + url.search, {
         method: request.method,
-        headers: request.headers,
-        body: queryBuffer ? queryBuffer : (request.method === "POST" ? request.body : null)
+        headers: forwardHeaders,
+        body: isPost ? queryBuffer : null
       });
     }
 
