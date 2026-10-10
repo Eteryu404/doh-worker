@@ -112,11 +112,17 @@ export default {
         domainName = extractDomainFromDNS(queryBuffer);
       }
 
-      // Blokowanie zgodne z listą i subdomenami
+      // Blokowanie zgodne z listą i subdomenami (z uwzględnieniem 300s TTL w cache)
       if (domainName && isBlocked(domainName, blocklistSet)) {
         return new Response(
           JSON.stringify({ Status: 3, Comment: "Blocked by Custom DoH Worker" }),
-          { status: 200, headers: { "Content-Type": "application/dns-json" } }
+          { 
+            status: 200, 
+            headers: { 
+              "Content-Type": "application/dns-json",
+              "Cache-Control": "public, max-age=300"
+            } 
+          }
         );
       }
 
