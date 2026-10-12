@@ -21,47 +21,59 @@ const FALLBACK_BLOCKLIST = new Set([
 
 let blocklistSet = new Set();
 let lastFetchTime = 0;
+let loadPromise = null;
 
 async function loadBlocklist() {
   const now = Date.now();
+
+  // Jeśli fetch już trwa – podłącz się do niego zamiast odpalać kolejny
+  if (loadPromise) return loadPromise;
 
   if (blocklistSet.size > 0 && (now - lastFetchTime) < CACHE_TTL) {
     return;
   }
 
-  try {
-    const res = await fetch(BLOCKLIST_URL);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const text = await res.text();
-    const lines = text.split('\n');
-    const newSet = new Set();
-
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim();
-      if (!line || line.startsWith('#')) continue;
-      line = line.replace(/^(0\.0\.0\.0|127\.0\.0\.1)\s+/, '').split('#')[0].trim();
-      if (line) {
-        newSet.add(line.toLowerCase().replace(/\.$/, ''));
+  loadPromise = (async () => {
+    try {
+      const res = await fetch(BLOCKLIST_URL, {
+        headers: { "User-Agent": "doh-worker/1.0" }
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
-    }
 
-    if (newSet.size > 0) {
-      blocklistSet = newSet;
-      lastFetchTime = now;
-      console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
-    }
-  } catch (err) {
-    console.error("Błąd podczas pobierania bloklisty:", err);
-    lastFetchTime = now; // zapobiega retry storm przy dłuższej awarii
+      const text = await res.text();
+      const lines = text.split('\n');
+      const newSet = new Set();
 
-    if (blocklistSet.size === 0) {
-      blocklistSet = FALLBACK_BLOCKLIST;
-      console.log("Użyto awaryjnej listy blokad.");
+      for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].trim();
+        if (!line || line.startsWith('#')) continue;
+        line = line.replace(/^(0\.0\.0\.0|127\.0\.0\.1)\s+/, '').split('#')[0].trim();
+        if (line) {
+          newSet.add(line.toLowerCase().replace(/\.$/, ''));
+        }
+      }
+
+      if (newSet.size > 0) {
+        blocklistSet = newSet;
+        lastFetchTime = now;
+        console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
+      }
+    } catch (err) {
+      console.error("Błąd podczas pobierania bloklisty:", err);
+      lastFetchTime = now; // zapobiega retry storm przy dłuższej awarii
+
+      if (blocklistSet.size === 0) {
+        blocklistSet = FALLBACK_BLOCKLIST;
+        console.log("Użyto awaryjnej listy blokad.");
+      }
+    } finally {
+      loadPromise = null;
     }
-  }
+  })();
+
+  return loadPromise;
 }
 
 // Sprawdzanie blokady hierarchicznie, z uwzględnieniem subdomen
@@ -135,7 +147,8 @@ function buildNxdomainWireFormat(requestBuffer) {
   }
 
   const responseBuffer = new Uint8Array(requestBuffer.slice(0));
-  responseBuffer[2] = 0x81; // QR=1, RD=1
+  // QR=1, zachowaj oryginalną flagę RD z requestu
+  responseBuffer[2] = (requestBuffer[2] & 0x01) | 0x80;
   responseBuffer[3] = 0x83; // RA=1, RCODE=3 (NXDOMAIN)
   responseBuffer[6] = 0x00; responseBuffer[7] = 0x00; // ANCOUNT
   responseBuffer[8] = 0x00; responseBuffer[9] = 0x00; // NSCOUNT
@@ -238,12 +251,16 @@ export default {
     if (request.method === "GET") {
       const dnsParam = url.searchParams.get("dns");
       if (dnsParam) {
-        let base64 = dnsParam.replace(/-/g, '+').replace(/_/g, '/');
-        while (base64.length % 4) base64 += '=';
-        const binaryString = atob(base64);
-        queryBuffer = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          queryBuffer[i] = binaryString.charCodeAt(i);
+        try {
+          let base64 = dnsParam.replace(/-/g, '+').replace(/_/g, '/');
+          while (base64.length % 4) base64 += '=';
+          const binaryString = atob(base64);
+          queryBuffer = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            queryBuffer[i] = binaryString.charCodeAt(i);
+          }
+        } catch (e) {
+          return new Response("Bad Request: invalid dns parameter", { status: 400 });
         }
       } else {
         domainName = url.searchParams.get("name") || "";
