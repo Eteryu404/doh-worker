@@ -22,75 +22,66 @@ const FALLBACK_BLOCKLIST = new Set([
 let blocklistSet = new Set();
 let lastFetchTime = 0;
 let blocklistETag = null;
-let loadPromise = null;
 
 async function loadBlocklist() {
   const now = Date.now();
 
-  // Jeśli fetch już trwa – podłącz się do niego zamiast odpalać kolejny
-  if (loadPromise) return loadPromise;
-
+  // Jeśli bloklista jest aktualna – nic nie rób
   if (blocklistSet.size > 0 && (now - lastFetchTime) < CACHE_TTL) {
     return;
   }
 
-  loadPromise = (async () => {
-    try {
-      const headers = { "User-Agent": "doh-worker/1.0" };
-      if (blocklistETag) {
-        headers["If-None-Match"] = blocklistETag;
-      }
-
-      const res = await fetch(BLOCKLIST_URL, { headers });
-
-      if (res.status === 304) {
-        // Lista się nie zmieniła – odśwież tylko czas, nie parsuj ponownie
-        lastFetchTime = now;
-        console.log("Bloklista bez zmian (304), używam poprzedniej wersji.");
-        return;
-      }
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const newETag = res.headers.get("ETag");
-      if (newETag) {
-        blocklistETag = newETag;
-      }
-
-      const text = await res.text();
-      const lines = text.split('\n');
-      const newSet = new Set();
-
-      for (let i = 0; i < lines.length; i++) {
-        let line = lines[i].trim();
-        if (!line || line.startsWith('#')) continue;
-        line = line.replace(/^(0\.0\.0\.0|127\.0\.0\.1)\s+/, '').split('#')[0].trim();
-        if (line) {
-          newSet.add(line.toLowerCase().replace(/\.$/, ''));
-        }
-      }
-
-      if (newSet.size > 0) {
-        blocklistSet = newSet;
-        lastFetchTime = now;
-        console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
-      }
-    } catch (err) {
-      console.error("Błąd podczas pobierania bloklisty:", err);
-      lastFetchTime = now; // zapobiega retry storm przy dłuższej awarii
-
-      if (blocklistSet.size === 0) {
-        blocklistSet = FALLBACK_BLOCKLIST;
-        console.log("Użyto awaryjnej listy blokad.");
-      }
-    } finally {
-      loadPromise = null;
+  try {
+    const headers = { "User-Agent": "doh-worker/1.0" };
+    if (blocklistETag) {
+      headers["If-None-Match"] = blocklistETag;
     }
-  })();
 
-  return loadPromise;
+    const res = await fetch(BLOCKLIST_URL, { headers });
+
+    if (res.status === 304) {
+      // Lista się nie zmieniła – odśwież tylko czas, nie parsuj ponownie
+      lastFetchTime = now;
+      console.log("Bloklista bez zmian (304), używam poprzedniej wersji.");
+      return;
+    }
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const newETag = res.headers.get("ETag");
+    if (newETag) {
+      blocklistETag = newETag;
+    }
+
+    const text = await res.text();
+    const lines = text.split('\n');
+    const newSet = new Set();
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      if (!line || line.startsWith('#')) continue;
+      line = line.replace(/^(0\.0\.0\.0|127\.0\.0\.1)\s+/, '').split('#')[0].trim();
+      if (line) {
+        newSet.add(line.toLowerCase().replace(/\.$/, ''));
+      }
+    }
+
+    if (newSet.size > 0) {
+      blocklistSet = newSet;
+      lastFetchTime = now;
+      console.log(`Załadowano bloklistę: ${blocklistSet.size} domen.`);
+    }
+  } catch (err) {
+    console.error("Błąd podczas pobierania bloklisty:", err);
+    lastFetchTime = now; // zapobiega retry storm przy dłuższej awarii
+
+    if (blocklistSet.size === 0) {
+      blocklistSet = FALLBACK_BLOCKLIST;
+      console.log("Użyto awaryjnej listy blokad.");
+    }
+  }
 }
 
 // Sprawdzanie blokady hierarchicznie, z uwzględnieniem subdomen
@@ -248,6 +239,8 @@ export default {
     const url = new URL(request.url);
     const upstreamUrl = (env && env.UPSTREAM_DOH) ? env.UPSTREAM_DOH : DEFAULT_UPSTREAM;
 
+    // Jeśli bloklista nie jest jeszcze załadowana – czekamy.
+    // W przeciwnym razie odświeżamy w tle, żeby nie blokować requestu.
     if (blocklistSet.size === 0) {
       await loadBlocklist();
     } else {
