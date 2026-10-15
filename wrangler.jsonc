@@ -2,5 +2,5 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "doh-worker",
   "main": "src/index.js",
-  "compatibility_date": "$today"
+  "compatibility_date": "2026-10-15"
 }
