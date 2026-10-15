@@ -21,6 +21,7 @@ const FALLBACK_BLOCKLIST = new Set([
 
 let blocklistSet = new Set();
 let lastFetchTime = 0;
+let blocklistETag = null;
 let loadPromise = null;
 
 async function loadBlocklist() {
@@ -35,11 +36,27 @@ async function loadBlocklist() {
 
   loadPromise = (async () => {
     try {
-      const res = await fetch(BLOCKLIST_URL, {
-        headers: { "User-Agent": "doh-worker/1.0" }
-      });
+      const headers = { "User-Agent": "doh-worker/1.0" };
+      if (blocklistETag) {
+        headers["If-None-Match"] = blocklistETag;
+      }
+
+      const res = await fetch(BLOCKLIST_URL, { headers });
+
+      if (res.status === 304) {
+        // Lista się nie zmieniła – odśwież tylko czas, nie parsuj ponownie
+        lastFetchTime = now;
+        console.log("Bloklista bez zmian (304), używam poprzedniej wersji.");
+        return;
+      }
+
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
+      }
+
+      const newETag = res.headers.get("ETag");
+      if (newETag) {
+        blocklistETag = newETag;
       }
 
       const text = await res.text();
